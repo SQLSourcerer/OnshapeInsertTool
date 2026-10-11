@@ -90,6 +90,19 @@ the registered extension. Rebuild/redeploy to test frontend edits.
 
 ## Validate the performance branch
 
+The Cloudflare frontend has a **Test diagnostics** drawer at the bottom of the
+panel. It automatically opens on startup failure and shows the latest 30 XHR/fetch
+requests with HTTP statuses and elapsed times. OAuth errors show recognized
+protocol codes such as `invalid_grant`; a status of `network failure` means no
+HTTP response was received. Request timings include network and server time, not
+rendering or completion of insertion. Cached frontend reads make no request and
+therefore add no diagnostic entry.
+
+Diagnostics stay in browser memory and can be cleared with **Clear diagnostics**.
+They contain route categories instead of document IDs and omit query strings,
+headers, tokens, request/response bodies, and arbitrary exception messages. They
+are not uploaded or persisted. The normal PHP frontend does not include the drawer.
+
 Use browser DevTools Network and consistent network conditions. Compare cold and
 repeat Global Library folder visits, searches, and published-part selections.
 Check deferred thumbnails while scrolling, fast navigation and breadcrumbs,
