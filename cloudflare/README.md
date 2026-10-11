@@ -73,8 +73,10 @@ admins can assign internal users through Developer settings.
 set it to your exact HTTPS Onshape origin. The proxy only sends bearer tokens to
 that configured origin, validates the frontend's `X-Server` header, and rejects
 upstream redirects. The HTML/CSS helper also only fetches from that origin.
-If Onshape returns an API redirect, inspect its destination before extending the
-proxy; it intentionally does not follow redirects with bearer credentials.
+Thumbnail GETs may follow up to three redirects within the configured HTTPS
+origin, checking scheme, hostname, port, and URL credentials at every hop.
+Other API redirects remain blocked; bearer credentials never follow a redirect
+to another origin.
 
 ## Local development
 
@@ -134,8 +136,9 @@ and document writes must be validated against your test account after deployment
 For thumbnail redirect failures, the testing Worker logs `[Thumbnail redirect]`
 with the upstream status and destination hostname and path. Query strings,
 fragments, URL credentials, and path segments of 24 or more characters are omitted
-or redacted. Missing or invalid destinations are logged as `null`. Redirects
-remain blocked. Use `npx wrangler tail --format=json` while reopening the affected
+or redacted. Missing or invalid destinations are logged as `null`. The `followed`
+field distinguishes accepted thumbnail fallbacks from blocked redirects.
+Use `npx wrangler tail --format=json` while reopening the affected
 library to capture these temporary diagnostics; a browser HAR cannot show the
 upstream redirect destination.
 

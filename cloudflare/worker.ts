@@ -96,7 +96,7 @@ async function route(request: Request, env: Env): Promise<Response> {
         const server = request.headers.get('X-Server');
         if (server && server.replace(/\/$/, '') !== onshape.origin) return error('Onshape server does not match configuration', 400);
         if (!request.headers.get('Authorization')?.startsWith('Bearer ')) return error('Missing bearer token', 401);
-        const target = new URL(onshape.origin);
+        let target = new URL(onshape.origin);
         target.pathname = path;
         target.search = url.search;
         const headers = new Headers();
@@ -104,28 +104,30 @@ async function route(request: Request, env: Env): Promise<Response> {
             const value = request.headers.get(name);
             if (value) headers.set(name, value);
         }
-        const response = await fetch(target.toString(), {
+        let response = await fetch(target.toString(), {
             method: request.method, headers, redirect: 'manual',
             body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
         });
-        // Never forward the bearer token to an upstream redirect destination.
-        if (response.status >= 300 && response.status < 400) {
-            if (/^\/api\/(?:v\d+\/)?thumbnails\//.test(path)) {
-                let destination: { host: string; path: string } | null = null;
-                try {
-                    const location = response.headers.get('Location');
-                    if (location) {
-                        const url = new URL(location, target);
-                        destination = {
-                            host: url.hostname,
-                            path: url.pathname.split('/').map(part => part.length >= 24 ? ':id' : part).join('/'),
-                        };
-                    }
-                } catch { /* Never log an unparsed Location value. */ }
-                console.warn('[Thumbnail redirect]', { status: response.status, destination });
-            }
+        const thumbnail = request.method === 'GET' && /^\/api\/(?:v\d+\/)?thumbnails\//.test(path);
+        for (let redirects = 0; response.status >= 300 && response.status < 400; redirects++) {
+            let next: URL | undefined;
+            try {
+                const location = response.headers.get('Location');
+                if (location) next = new URL(location, target);
+            } catch { /* Reject malformed destinations without logging raw values. */ }
+            const follow = thumbnail && redirects < 3 && next && next.protocol === 'https:' &&
+                next.origin === onshape.origin && !next.username && !next.password;
+            if (thumbnail) console.warn('[Thumbnail redirect]', {
+                status: response.status, followed: !!follow,
+                destination: next ? {
+                    host: next.hostname,
+                    path: next.pathname.split('/').map(part => part.length >= 24 ? ':id' : part).join('/'),
+                } : null,
+            });
             await response.body?.cancel();
-            return error('Unexpected Onshape API redirect', 502);
+            if (!follow || !next) return error('Unexpected Onshape API redirect', 502);
+            target = next;
+            response = await fetch(target.toString(), { method: 'GET', headers, redirect: 'manual' });
         }
         const resultHeaders = new Headers({ 'Cache-Control': 'no-store' });
         for (const name of ['Content-Type', 'Content-Disposition', 'Retry-After', 'X-Rate-Limit-Remaining', 'Content-Range', 'Accept-Ranges']) {

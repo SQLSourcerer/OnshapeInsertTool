@@ -109,7 +109,7 @@ test('API proxy rejects arbitrary upstreams, missing tokens and redirected API r
     assert.equal((await redirected('/api/users', { headers: { Authorization: 'Bearer a' } })).status, 502);
 });
 
-test('thumbnail redirects log only sanitized destinations and remain blocked', async () => {
+test('thumbnail redirects log only sanitized destinations', async () => {
     for (const location of [
         'https://username:password@images.onshape.com/api/thumbnails/' + 'a'.repeat(24) + '/s/70x40?signature=private#fragment',
         '/api/thumbnails/' + 'b'.repeat(24) + '/s/70x40?token=private',
@@ -119,13 +119,14 @@ test('thumbnail redirects log only sanitized destinations and remain blocked', a
         let calls = 0;
         const run = harness(async () => {
             calls++;
+            if (calls === 2) return new Response('image', { headers: { 'Content-Type': 'image/png' } });
             return new Response(null, { status: 307, headers: location ? { Location: location } : {} });
         }, logs);
         const response = await run('/api/thumbnails/d/' + 'c'.repeat(24) + '/s/70x40', {
             headers: { Authorization: 'Bearer sensitive-token' },
         });
-        assert.equal(response.status, 502);
-        assert.equal(calls, 1);
+        assert.equal(response.status, location?.startsWith('/') ? 200 : 502);
+        assert.equal(calls, location?.startsWith('/') ? 2 : 1);
         assert.equal(logs.length, 1);
         assert.equal(logs[0][0], '[Thumbnail redirect]');
         assert.equal(logs[0][1].status, 307);
@@ -134,6 +135,43 @@ test('thumbnail redirects log only sanitized destinations and remain blocked', a
             assert.equal(logs[0][1].destination.path, '/api/thumbnails/:id/s/70x40');
         } else assert.equal(logs[0][1].destination, null);
         assert.doesNotMatch(JSON.stringify(logs), /username|password|private|fragment|sensitive-token|a{24}|b{24}|c{24}/);
+    }
+});
+
+test('thumbnail GETs follow same HTTPS origin redirects and preserve the final image', async () => {
+    const calls = [];
+    const data = new Uint8Array([0, 128, 255]);
+    const run = harness(async (url, init) => {
+        calls.push(url);
+        assert.equal(init.method, 'GET');
+        assert.equal(init.redirect, 'manual');
+        assert.equal(init.headers.get('Authorization'), 'Bearer token');
+        if (calls.length === 1) return Response.redirect('https://cad.onshape.com/images/first.png', 307);
+        if (calls.length === 2) return new Response('discard this', { status: 302, headers: { Location: 'default-document.png' } });
+        return new Response(data, { headers: { 'Content-Type': 'image/png' } });
+    });
+    const response = await run('/api/thumbnails/d/part/s/70x40', { headers: { Authorization: 'Bearer token' } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Content-Type'), 'image/png');
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), data);
+    assert.equal(calls[2], 'https://cad.onshape.com/images/default-document.png');
+});
+
+test('thumbnail redirects reject other origins, credentials, loops and redirecting writes', async () => {
+    for (const destination of [
+        'https://evil.example/image', 'http://cad.onshape.com/image', 'https://cad.onshape.com:444/image',
+        'https://user:password@cad.onshape.com/image', '/loop',
+    ]) {
+        let calls = 0;
+        const run = harness(async () => { calls++; return new Response('redirect', { status: 307, headers: { Location: destination } }); });
+        assert.equal((await run('/api/thumbnails/d/part/s/70x40', { headers: { Authorization: 'Bearer token' } })).status, 502);
+        assert.equal(calls, destination === '/loop' ? 4 : 1);
+    }
+    for (const [path, method] of [['/api/thumbnails/d/part/s/70x40', 'POST'], ['/api/documents', 'GET']]) {
+        let calls = 0;
+        const run = harness(async () => { calls++; return Response.redirect('https://cad.onshape.com/images/default-document.png', 307); });
+        assert.equal((await run(path, { method, headers: { Authorization: 'Bearer token' } })).status, 502);
+        assert.equal(calls, 1);
     }
 });
 
