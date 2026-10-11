@@ -4,11 +4,13 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 const ts = require('typescript');
 
-function harness(fetch = () => { throw new Error('Unexpected upstream request'); }, logs = []) {
+function harness(fetch = () => { throw new Error('Unexpected upstream request'); }, logs = [], cache) {
     const exports = {};
     const source = fs.readFileSync(require.resolve('../cloudflare/worker.ts'), 'utf8');
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
     vm.runInNewContext(code.outputText, { exports, URL, URLSearchParams, Request, Response, Headers, TypeError, fetch,
+        caches: cache && { open: async () => cache },
+        Date: cache ? class extends Date { static now() { return cache.now; } } : Date,
         console: { warn: (...args) => logs.push(args), error() {} },
     });
     const env = {
@@ -18,6 +20,242 @@ function harness(fetch = () => { throw new Error('Unexpected upstream request');
     };
     return (path, init, overrides) => exports.default.fetch(new Request('https://test.workers.dev' + path, init), { ...env, ...overrides });
 }
+
+function memoryCache() {
+    const entries = new Map();
+    return {
+        now: 0, entries,
+        async match(key) {
+            const entry = entries.get(key.url);
+            return entry && entry.expires > this.now ? entry.response.clone() : undefined;
+        },
+        async put(key, response) {
+            const ttl = Number(response.headers.get('Cache-Control').match(/max-age=(\d+)/)[1]);
+            // Consume streams as Cloudflare does; never store a bearer token in a key.
+            const stored = new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
+            entries.set(key.url, { response: stored, expires: this.now + ttl * 1000 });
+        },
+        async delete(key) { return entries.delete(typeof key === 'string' ? key : key.url); },
+    };
+}
+
+const libraryId = '2fd951db6d0261aba5f16a5d';
+const documentId = 'a'.repeat(24);
+const blobPath = '/api/v10/blobelements/d/' + libraryId + '/w/' + 'b'.repeat(24) + '/e/' + 'c'.repeat(24);
+const thumbnailPath = '/api/thumbnails/d/' + documentId + '/s/70x40';
+const user = token => ({ headers: { Authorization: 'Bearer ' + token } });
+
+test('backend library allowlist matches the frontend Global Libraries', () => {
+    const frontend = fs.readFileSync(require.resolve('../app/app.ts'), 'utf8').match(/globalLibrariesNodes: string\[\] = \[([\s\S]*?)\];/)[1];
+    const worker = fs.readFileSync(require.resolve('../cloudflare/worker.ts'), 'utf8').match(/const globalLibraries = \[([\s\S]*?)\];/)[1];
+    assert.deepEqual(worker.match(/[a-f0-9]{24}/g), frontend.match(/[a-f0-9]{24}/g));
+});
+
+test('library JSON is shared across users and Worker instances, expires, and omits another user quota', async () => {
+    const cache = memoryCache();
+    let calls = 0;
+    const upstream = async () => { calls++; return new Response(JSON.stringify({ children: [{ jsonType: 'document-summary', id: documentId }] }), {
+        headers: { 'Content-Type': 'application/json', 'X-Rate-Limit-Remaining': '12' },
+    }); };
+    const first = await harness(upstream, [], cache)(blobPath, user('alice-secret'));
+    assert.equal(first.headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal(first.headers.get('X-Rate-Limit-Remaining'), '12');
+    const run = harness(upstream, [], cache);
+    const hit = await run(blobPath, user('bob-secret'));
+    assert.equal(hit.headers.get('X-Global-Library-Cache'), 'HIT');
+    assert.equal(hit.headers.get('Cache-Control'), 'no-store');
+    assert.equal(hit.headers.get('X-Rate-Limit-Remaining'), null);
+    assert.equal(await hit.text(), await first.text());
+    assert.equal(calls, 1);
+    assert.equal((await run(blobPath)).status, 401);
+    assert.equal((await run(blobPath, { headers: { Authorization: 'Bearer x', 'X-Server': 'https://evil.example' } })).status, 400);
+    assert.doesNotMatch([...cache.entries.keys()].join(), /alice-secret|bob-secret/);
+    cache.now = 15 * 60 * 1000;
+    assert.equal((await run(blobPath, user('bob'))).headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal(calls, 2);
+});
+
+test('thumbnails learned from public library JSON share binary responses but unknown thumbnails bypass', async () => {
+    const cache = memoryCache();
+    const opaque = '/api/thumbnails/' + 'd'.repeat(40) + '/s/70x40?t=revision';
+    let calls = 0;
+    const upstream = async path => {
+        calls++;
+        if (path.includes('/blobelements/')) return new Response(JSON.stringify({ children: [
+            { jsonType: 'document-summary', id: documentId, thumbnail: { sizes: [{ href: 'https://cad.onshape.com' + opaque }] } },
+            { href: 'https://evil.example/api/thumbnails/foreign/s/70x40' },
+        ] }));
+        return new Response(new Uint8Array([0, 128, 255]), { headers: { 'Content-Type': 'image/png' } });
+    };
+    let run = harness(upstream, [], cache);
+    assert.equal((await run(thumbnailPath, user('alice'))).headers.get('X-Global-Library-Cache'), 'BYPASS');
+    await run(blobPath, user('alice'));
+    run = harness(upstream, [], cache);
+    for (const path of [thumbnailPath, opaque]) {
+        assert.equal((await run(path, user('alice'))).headers.get('X-Global-Library-Cache'), 'MISS');
+        const hit = await run(path, user('bob'));
+        assert.equal(hit.headers.get('X-Global-Library-Cache'), 'HIT');
+        assert.deepEqual(new Uint8Array(await hit.arrayBuffer()), new Uint8Array([0, 128, 255]));
+    }
+    assert.equal(calls, 4);
+    for (const path of ['/api/thumbnails/foreign/s/70x40', thumbnailPath.replace(documentId, 'e'.repeat(24))]) {
+        assert.equal((await run(path, user('bob'))).headers.get('X-Global-Library-Cache'), 'BYPASS');
+    }
+    cache.now = 5 * 60 * 1000;
+    assert.equal((await run(thumbnailPath, user('bob'))).headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal((await run(opaque, user('bob'))).headers.get('X-Global-Library-Cache'), 'HIT');
+    cache.now = 15 * 60 * 1000;
+    assert.equal((await run(opaque, user('bob'))).headers.get('X-Global-Library-Cache'), 'BYPASS');
+});
+
+test('vendor logos reuse the library document allowlist and remain shared for three hours', async () => {
+    const cache = memoryCache();
+    let calls = 0;
+    const upstream = async () => { calls++; return new Response('logo', { headers: { 'Content-Type': 'image/png' } }); };
+    const path = '/api/thumbnails/d/' + libraryId + '/s/70x40';
+    const first = await harness(upstream, [], cache)(path, user('alice'));
+    assert.equal(first.headers.get('X-Global-Library-Cache'), 'MISS');
+    const run = harness(upstream, [], cache);
+    cache.now = 3 * 60 * 60 * 1000 - 1;
+    const hit = await run(path, user('bob'));
+    assert.equal(hit.headers.get('X-Global-Library-Cache'), 'HIT');
+    assert.equal(await hit.text(), 'logo');
+    assert.equal(calls, 1);
+    cache.now++;
+    assert.equal((await run(path, user('bob'))).headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal(calls, 2);
+});
+
+test('version-specific and thumbnail-ID images remain cached for three hours without extending expiry on hits', async () => {
+    const cache = memoryCache();
+    const opaque = '/api/thumbnails/' + 'd'.repeat(40) + '/s/70x40';
+    const versioned = thumbnailPath.replace('/s/', '/v/' + 'f'.repeat(24) + '/s/');
+    let imageCalls = 0;
+    const run = harness(async path => {
+        if (path.includes('/blobelements/')) return new Response(JSON.stringify({ children: [
+            { jsonType: 'document-summary', id: documentId, thumbnail: { sizes: [{ href: 'https://cad.onshape.com' + opaque }] } },
+        ] }));
+        imageCalls++;
+        return new Response('image', { headers: { 'Content-Type': 'image/png' } });
+    }, [], cache);
+    await run(blobPath, user('alice'));
+    for (const path of [versioned, opaque]) {
+        assert.equal((await run(path, user('alice'))).headers.get('X-Global-Library-Cache'), 'MISS');
+    }
+    cache.now = 3 * 60 * 60 * 1000 - 1;
+    // Library reads refresh eligibility separately from the image response TTL.
+    await run(blobPath, user('bob'));
+    for (const path of [versioned, opaque]) {
+        assert.equal((await run(path, user('bob'))).headers.get('X-Global-Library-Cache'), 'HIT');
+    }
+    assert.equal(imageCalls, 2);
+    cache.now++;
+    for (const path of [versioned, opaque]) {
+        assert.equal((await run(path, user('bob'))).headers.get('X-Global-Library-Cache'), 'MISS');
+    }
+    assert.equal(imageCalls, 4);
+});
+
+test('cache variants preserve queries and Accept, while private, tenant, conditional and write requests bypass', async () => {
+    const cache = memoryCache();
+    const calls = [];
+    const run = harness(async (url, init) => {
+        calls.push({ url, init });
+        return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    }, [], cache);
+    await run(blobPath, user('a'));
+    await run(blobPath + '?contentDisposition=attachment', user('b'));
+    await run(blobPath, { headers: { Authorization: 'Bearer b', Accept: 'application/json' } });
+    assert.equal(calls.length, 3);
+    for (const path of [blobPath.replace(libraryId, documentId), '/api/documents/' + libraryId, '/api/globaltreenodes/folder/test/insertables']) {
+        await run(path, user('a')); await run(path, user('b'));
+    }
+    assert.equal(calls.length, 9);
+    for (const header of ['Range', 'If-Match', 'If-None-Match', 'If-Modified-Since']) {
+        const response = await run(blobPath, { headers: { Authorization: 'Bearer b', [header]: 'test' } });
+        assert.equal(response.headers.get('X-Global-Library-Cache'), 'BYPASS');
+        assert.equal(calls.at(-1).init.headers.get(header), 'test');
+    }
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']) {
+        const response = await run(blobPath, { method, headers: { Authorization: 'Bearer a' } });
+        assert.equal(response.headers.get('X-Global-Library-Cache'), 'BYPASS');
+    }
+    const tenant = await run(blobPath, user('a'), { ONSHAPE_ORIGIN: 'https://enterprise.onshape.com' });
+    assert.equal(tenant.headers.get('X-Global-Library-Cache'), 'BYPASS');
+});
+
+test('failed, partial, cookie-bearing, malformed and non-image responses never enter the shared cache', async () => {
+    for (const options of [{ status: 403 }, { status: 429 }, { status: 503 }, { status: 206 }, { headers: { 'Set-Cookie': 'private=1' } }, {}]) {
+        const cache = memoryCache();
+        let calls = 0;
+        const run = harness(async () => { calls++; return new Response('not JSON', options); }, [], cache);
+        await run(blobPath, user('a')); await run(blobPath, user('b'));
+        assert.equal(calls, 2);
+        assert.equal(cache.entries.size, 0);
+    }
+    const cache = memoryCache();
+    let calls = 0;
+    const run = harness(async () => { calls++; return new Response('error', { headers: { 'Content-Type': 'text/html' } }); }, [], cache);
+    const path = '/api/thumbnails/d/' + libraryId + '/s/70x40';
+    await run(path, user('a')); await run(path, user('b'));
+    assert.equal(calls, 2);
+    assert.equal(cache.entries.size, 0);
+});
+
+test('cache failures fall back to upstream without breaking successful responses', async () => {
+    const cache = memoryCache();
+    cache.match = async () => { throw new Error('unavailable'); };
+    const run = harness(async () => new Response('{}'), [], cache);
+    assert.equal(await (await run(blobPath, user('a'))).text(), '{}');
+    cache.match = async () => undefined;
+    cache.put = async () => { throw new Error('unavailable'); };
+    assert.equal(await (await run(blobPath, user('a'))).text(), '{}');
+});
+
+test('successful library writes invalidate Blob variants and learned thumbnail membership, failed writes retain them', async () => {
+    const cache = memoryCache();
+    let contents = { children: [{ jsonType: 'document-summary', id: documentId }] };
+    let writeStatus = 403;
+    const run = harness(async (url, init) => {
+        if (init.method !== 'GET') return new Response('{}', { status: writeStatus });
+        if (url.includes('/blobelements/')) return new Response(JSON.stringify(contents));
+        return new Response('image', { headers: { 'Content-Type': 'image/png' } });
+    }, [], cache);
+    await run(blobPath, user('a'));
+    await run(blobPath, { headers: { Authorization: 'Bearer a', Accept: 'application/json' } });
+    await run(thumbnailPath, user('a'));
+    await run(blobPath, { method: 'POST', ...user('a') });
+    assert.equal((await run(blobPath, user('b'))).headers.get('X-Global-Library-Cache'), 'HIT');
+    contents = { children: [] };
+    writeStatus = 200;
+    await run(blobPath, { method: 'POST', ...user('a') });
+    assert.equal((await run(thumbnailPath, user('b'))).headers.get('X-Global-Library-Cache'), 'BYPASS');
+    const fresh = await run(blobPath, user('b'));
+    assert.equal(fresh.headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal(await fresh.text(), JSON.stringify(contents));
+    assert.equal((await run(blobPath, { headers: { Authorization: 'Bearer b', Accept: 'application/json' } })).headers.get('X-Global-Library-Cache'), 'MISS');
+});
+
+test('vendor document summaries teach opaque thumbnail URLs without caching personalized fields', async () => {
+    const cache = memoryCache();
+    const opaque = '/api/thumbnails/' + 'f'.repeat(40) + '/s/70x40';
+    let calls = 0;
+    const run = harness(async (url, init) => {
+        calls++;
+        if (url.includes('/documents/')) return new Response(JSON.stringify({
+            userSpecific: init.headers.get('Authorization'), thumbnail: { sizes: [{ href: 'https://cad.onshape.com' + opaque }] },
+            userSpecificUrl: 'https://cad.onshape.com/documents/' + documentId,
+        }));
+        return new Response('image', { headers: { 'Content-Type': 'image/png' } });
+    }, [], cache);
+    const path = '/api/documents/' + libraryId;
+    assert.match(await (await run(path, user('alice'))).text(), /alice/);
+    assert.match(await (await run(path, user('bob'))).text(), /bob/);
+    assert.equal((await run(opaque, user('alice'))).headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal((await run(opaque, user('bob'))).headers.get('X-Global-Library-Cache'), 'HIT');
+    assert.equal(calls, 3);
+    assert.equal((await run(thumbnailPath, user('bob'))).headers.get('X-Global-Library-Cache'), 'BYPASS');
+});
 
 test('Cloudflare launch supplies the configured client and exact frontend callback', async () => {
     const run = harness();

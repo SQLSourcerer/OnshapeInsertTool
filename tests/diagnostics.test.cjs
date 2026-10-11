@@ -7,7 +7,16 @@ const exportsForTest = {};
 const source = fs.readFileSync(require.resolve('../cloudflare/diagnostics.ts'), 'utf8');
 const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
 vm.runInNewContext(code.outputText, { exports: exportsForTest, URL, require: () => ({}) });
-const { requestLabel, errorCode, DiagnosticLog } = exportsForTest;
+const { requestLabel, errorCode, cacheState, DiagnosticLog } = exportsForTest;
+
+test('diagnostics display only recognized backend cache states', () => {
+    for (const state of ['HIT', 'MISS', 'BYPASS']) assert.equal(cacheState(state), state);
+    assert.equal(cacheState('secret response value'), undefined);
+    assert.equal(cacheState(null), undefined);
+    const log = new DiagnosticLog();
+    log.record({ method: 'GET', route: '/api/blobelements/…', status: 200, ms: 3, cache: 'HIT' });
+    assert.match(log.text(), /cache HIT/);
+});
 
 test('diagnostic labels omit query credentials, document IDs and external URLs', () => {
     const origin = 'https://test.workers.dev';

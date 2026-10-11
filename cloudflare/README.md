@@ -128,10 +128,67 @@ library edits invalidating cached reads, and restoration of the final location
 after rapid browsing. Measure folder display, usable insert choices, and insertion
 completion separately. Reload the panel for a fresh in-memory cache.
 
-No backend response cache is enabled, so the Worker does not conceal frontend
-cache behavior. Cloudflare still serves static assets through its CDN. The free
-plan has CPU and request limits; watch Worker metrics during testing. Live OAuth
-and document writes must be validated against your test account after deployment.
+The Worker also caches selected Global Library responses across users, as described
+below. Frontend cache hits still make no request; backend cache hits appear in the
+drawer as `cache HIT`. Cloudflare serves static assets through its CDN. The free
+plan has CPU and request limits; watch Worker metrics during testing. Live OAuth,
+cache hits, and document writes must be validated against your test account after
+deployment.
+
+## Shared Global Library caching
+
+The Worker uses Cloudflare's Cache API for the nine public library documents listed
+in `app/app.ts`. A test checks that its allowlist matches the frontend. This allowlist
+applies only to `https://cad.onshape.com`; Enterprise origins bypass shared caching.
+No KV namespace, database, or additional secret is required.
+
+Global Library folder contents and search indexes are JSON files stored in Blob
+elements inside those documents. Successful, valid JSON Blob downloads are cached
+for 15 minutes. Vendor logo thumbnails requested by one of the nine library document
+IDs are cached for three hours, reusing the library allowlist without a separate
+list of logo URLs. Other successful image responses are cached for three hours when
+requested by thumbnail ID or document version, and five minutes for mutable
+document/workspace thumbnail routes. The full API path, query string, origin, and `Accept` header form
+the response key; user IDs and bearer tokens are excluded.
+
+The Worker learns eligible CAD document IDs and exact thumbnail URLs from library
+JSON. It also learns vendor thumbnails from the nine library document summaries,
+but does not cache those summaries because they may contain user-specific fields.
+Membership expires after 15 minutes without another qualifying library read.
+Unknown thumbnails, personal libraries, ordinary folder listings, metadata,
+configuration reads, and insertable lists continue to call Onshape. A browser
+header cannot opt a private resource into this cache.
+
+API requests still require a bearer header and the configured Onshape origin.
+Shared cache hits bypass Onshape permission checks, so only documents intentionally
+public to all app users belong in the allowlist. OAuth, insertion and other writes,
+partial/conditional reads, errors, cookie-bearing responses, malformed library
+JSON, and non-image thumbnail responses bypass the shared cache. Responses sent
+to browsers retain `Cache-Control: no-store`. Cached responses omit the originating
+user's rate-limit/cooldown headers. Cache failures fall back to normal proxying.
+
+A successful write through this Worker to an allowlisted library clears its known
+cached Blob downloads and thumbnail membership in the serving data center. Writes
+made elsewhere and caches in other data centers become fresh by TTL. Already cached
+vendor logos can remain stale for three hours, and other mutable thumbnails for
+five minutes. The existing frontend cache
+can retain Global Library reads for three hours within an open panel.
+
+Cache API contents are local to each Cloudflare data center and may be evicted.
+Simultaneous cold requests can still make separate upstream calls. Concurrent
+membership-index updates can lose discoveries and cause extra cache misses; they
+cannot add resources outside the public library data. These limits affect savings,
+not insertion behavior.
+
+To validate, open the same Global Library folder under two users or reload the
+panel to clear its in-memory cache. The first backend read should show `cache MISS`
+and a repeat should show `cache HIT`, with no new Onshape request on the hit.
+`cache BYPASS` means the response was not served or stored by the shared cache.
+Inspect `X-Global-Library-Cache` in Network or use the test diagnostics drawer.
+Verify actual hits on the deployed host; local unit tests do not establish CDN
+availability, eviction behavior, or production savings.
+
+Cloudflare reference: [Cache API](https://developers.cloudflare.com/workers/runtime-apis/cache/).
 
 For thumbnail redirect failures, the testing Worker logs `[Thumbnail redirect]`
 with the upstream status and destination hostname and path. Query strings,

@@ -1,6 +1,10 @@
 import { installInsertionTrace } from './insertiontrace';
 
-type RequestRecord = { method: string; route: string; status: number; ms: number; error?: string };
+type RequestRecord = { method: string; route: string; status: number; ms: number; error?: string; cache?: string };
+
+export function cacheState(value: string | null): string | undefined {
+    return value && ['HIT', 'MISS', 'BYPASS'].includes(value) ? value : undefined;
+}
 
 // Report route categories, never document IDs, query strings, headers, or bodies.
 export function requestLabel(value: string, origin: string): string {
@@ -41,7 +45,7 @@ export class DiagnosticLog {
             'Runtime errors: ' + this.runtimeFailures,
             'Recent requests (maximum 30):'];
         for (const item of this.requests) {
-            lines.push(`${item.method} ${item.route} → ${item.status || 'network failure'} (${item.ms} ms)${item.error ? ' · ' + item.error : ''}`);
+            lines.push(`${item.method} ${item.route} → ${item.status || 'network failure'} (${item.ms} ms)${item.cache ? ' · cache ' + item.cache : ''}${item.error ? ' · ' + item.error : ''}`);
         }
         if (!this.requests.length) lines.push('No requests recorded yet.');
         return lines.join('\n');
@@ -109,7 +113,8 @@ export function installDiagnostics(app: { failApp(reason: any): void }): void {
             end(`status ${this.status}`);
             let code: string | undefined;
             if (this.status >= 400 && (!this.responseType || this.responseType === 'text')) code = errorCode(this.responseText);
-            record({ ...info, status: this.status, ms: Math.round(performance.now() - start), error: code });
+            record({ ...info, status: this.status, ms: Math.round(performance.now() - start), error: code,
+                cache: cacheState(this.getResponseHeader('X-Global-Library-Cache')) });
         }, { once: true });
         return (originalSend as any).apply(this, args);
     };
@@ -124,7 +129,8 @@ export function installDiagnostics(app: { failApp(reason: any): void }): void {
         try {
             const response = await originalFetch(input, init);
             end(`status ${response.status}`);
-            record({ method, route, status: response.status, ms: Math.round(performance.now() - start) });
+            record({ method, route, status: response.status, ms: Math.round(performance.now() - start),
+                cache: cacheState(response.headers.get('X-Global-Library-Cache')) });
             return response;
         } catch (cause) {
             end('network failure');

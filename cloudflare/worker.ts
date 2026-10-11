@@ -6,6 +6,87 @@ interface Env {
 }
 
 const oauthOrigin = 'https://oauth.onshape.com';
+// Keep aligned with app.ts; these library documents contain public, shared data.
+const globalLibraries = [
+    '2fd951db6d0261aba5f16a5d', '65d1b86ea725f780582d9dd0', 'f4aa6bf18a572782640d6476',
+    'f3b99a8450b4f983b1efa03c', 'b71490095d0a6e87f29c4975', '1348b49fc35396eed14d589b',
+    '48ccfa30daa8fc8dad88f0eb', 'ef69c7f97eac419fe24faf1d', '07986b342f5e967bbfd021f8',
+];
+const libraryTTL = 15 * 60;
+type Membership = Record<string, { expires: number; documents: string[]; thumbnails: string[]; responses: string[] }>;
+
+function cacheKey(url: URL, kind: string, resource: string, accept = ''): Request {
+    const key = new URL('/__global-library-cache/v1/' + kind, url.origin);
+    key.search = new URLSearchParams({ resource, accept }).toString();
+    return new Request(key.toString());
+}
+
+async function sharedCache(origin: string): Promise<Cache | undefined> {
+    // The allowlist belongs to the public cad service, not Enterprise tenants.
+    if (origin !== 'https://cad.onshape.com' || typeof caches === 'undefined') return undefined;
+    try { return await caches.open('global-library-v1'); }
+    catch { console.warn('[Global Library cache unavailable]'); return undefined; }
+}
+
+async function membership(cache: Cache, url: URL, library: string): Promise<Membership> {
+    const response = await cache.match(cacheKey(url, 'membership', library));
+    return response ? await response.json() as Membership : {};
+}
+
+async function learnThumbnails(cache: Cache, url: URL, library: string, data: unknown, responseKey: Request): Promise<void> {
+    const documents = new Set<string>();
+    const thumbnails = new Set<string>();
+    const pending: unknown[] = [data];
+    while (pending.length) {
+        const value = pending.pop();
+        if (!value || typeof value !== 'object') continue;
+        const node = value as Record<string, unknown>;
+        if (typeof node.id === 'string' && /^[a-f0-9]{24}$/.test(node.id) &&
+            (node.jsonType === 'document-summary' || node.jsonType === 'document-summary-configured')) documents.add(node.id);
+        for (const child of Object.values(node)) {
+            if (typeof child === 'string') {
+                try {
+                    const href = new URL(child, 'https://cad.onshape.com');
+                    if (href.origin !== 'https://cad.onshape.com' || href.username || href.password) continue;
+                    const document = href.pathname.match(/^\/(?:api\/(?:v\d+\/)?)?documents\/(?:d\/)?([a-f0-9]{24})(?:\/|$)/);
+                    if (document) documents.add(document[1]);
+                    if (/^\/api\/(?:v\d+\/)?thumbnails\//.test(href.pathname)) thumbnails.add(href.pathname + href.search);
+                } catch { /* Library text is not necessarily a URL. */ }
+            } else if (child && typeof child === 'object') pending.push(child);
+        }
+    }
+    const entries = await membership(cache, url, library);
+    for (const [key, entry] of Object.entries(entries)) if (entry.expires <= Date.now()) delete entries[key];
+    const entryKey = url.pathname + url.search;
+    entries[entryKey] = {
+        expires: Date.now() + libraryTTL * 1000, documents: [...documents], thumbnails: [...thumbnails],
+        responses: [...new Set([...(entries[entryKey]?.responses || []), responseKey.url])],
+    };
+    // shortcut: concurrent index updates can lose membership and cause cache misses; coordinate writes if measured necessary.
+    await cache.put(cacheKey(url, 'membership', library), new Response(JSON.stringify(entries), {
+        headers: { 'Cache-Control': 'public, max-age=' + libraryTTL, 'Content-Type': 'application/json' },
+    }));
+}
+
+async function invalidateLibrary(cache: Cache, url: URL, library: string): Promise<void> {
+    const entries = await membership(cache, url, library);
+    await Promise.all(Object.values(entries).flatMap(entry => entry.responses.map(key => cache.delete(key))));
+    await cache.delete(cacheKey(url, 'membership', library));
+}
+
+async function thumbnailEligible(cache: Cache, url: URL): Promise<boolean> {
+    const document = url.pathname.match(/^\/api\/(?:v\d+\/)?thumbnails\/d\/([a-f0-9]{24})(?:\/|$)/)?.[1];
+    if (document && globalLibraries.includes(document)) return true;
+    const indexes = await Promise.all(globalLibraries.map(library => membership(cache, url, library)));
+    return indexes.some(index => Object.values(index).some(entry => entry.expires > Date.now() &&
+        ((document && entry.documents.includes(document)) || entry.thumbnails.includes(url.pathname + url.search))));
+}
+
+function cacheResult(response: Response, state: string): Response {
+    const result = uncached(response);
+    result.headers.set('X-Global-Library-Cache', state);
+    return result;
+}
 
 function error(message: string, status: number): Response {
     return new Response(JSON.stringify({ error: message }), {
@@ -96,11 +177,32 @@ async function route(request: Request, env: Env): Promise<Response> {
         const server = request.headers.get('X-Server');
         if (server && server.replace(/\/$/, '') !== onshape.origin) return error('Onshape server does not match configuration', 400);
         if (!request.headers.get('Authorization')?.startsWith('Bearer ')) return error('Missing bearer token', 401);
+        const thumbnail = request.method === 'GET' && /^\/api\/(?:v\d+\/)?thumbnails\//.test(path);
+        const blobLibrary = path.match(/^\/api\/(?:v\d+\/)?blobelements\/d\/([a-f0-9]{24})\/w\/[a-f0-9]{24}\/e\/[a-f0-9]{24}$/)?.[1];
+        const summaryLibrary = path.match(/^\/api\/(?:v\d+\/)?documents\/([a-f0-9]{24})$/)?.[1];
+        let cache: Cache | undefined;
+        let key: Request | undefined;
+        const library = blobLibrary && globalLibraries.includes(blobLibrary) ? blobLibrary : undefined;
+        // Partial and conditional requests retain upstream semantics.
+        if (request.method === 'GET' && !['Range', 'If-Match', 'If-None-Match', 'If-Modified-Since'].some(name => request.headers.has(name)) &&
+            (library || thumbnail)) {
+            cache = await sharedCache(onshape.origin);
+            try {
+                if (cache && (library || await thumbnailEligible(cache, url))) {
+                    key = cacheKey(url, 'response', onshape.origin + path + url.search, request.headers.get('Accept') || '');
+                    const hit = await cache.match(key);
+                    if (hit) {
+                        if (library) await learnThumbnails(cache, url, library, await hit.clone().json(), key);
+                        return cacheResult(hit, 'HIT');
+                    }
+                }
+            } catch { console.warn('[Global Library cache read failed]'); cache = undefined; key = undefined; }
+        }
         let target = new URL(onshape.origin);
         target.pathname = path;
         target.search = url.search;
         const headers = new Headers();
-        for (const name of ['Authorization', 'Content-Type', 'Accept', 'Range', 'If-Match']) {
+        for (const name of ['Authorization', 'Content-Type', 'Accept', 'Range', 'If-Match', 'If-None-Match', 'If-Modified-Since']) {
             const value = request.headers.get(name);
             if (value) headers.set(name, value);
         }
@@ -108,7 +210,6 @@ async function route(request: Request, env: Env): Promise<Response> {
             method: request.method, headers, redirect: 'manual',
             body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
         });
-        const thumbnail = request.method === 'GET' && /^\/api\/(?:v\d+\/)?thumbnails\//.test(path);
         for (let redirects = 0; response.status >= 300 && response.status < 400; redirects++) {
             let next: URL | undefined;
             try {
@@ -134,7 +235,47 @@ async function route(request: Request, env: Env): Promise<Response> {
             const value = response.headers.get(name);
             if (value) resultHeaders.set(name, value);
         }
-        return new Response(response.body, { status: response.status, statusText: response.statusText, headers: resultHeaders });
+        const result = new Response(response.body, { status: response.status, statusText: response.statusText, headers: resultHeaders });
+        // Learn vendor thumbnail URLs without sharing user-specific document summaries.
+        if (request.method === 'GET' && result.status === 200 && summaryLibrary && globalLibraries.includes(summaryLibrary) &&
+            !response.headers.has('Set-Cookie')) {
+            try {
+                const summaryCache = await sharedCache(onshape.origin);
+                if (summaryCache) {
+                    const summary = await result.clone().json() as { thumbnail?: unknown };
+                    await learnThumbnails(summaryCache, url, summaryLibrary, summary.thumbnail,
+                        cacheKey(url, 'response', onshape.origin + path + url.search));
+                }
+            } catch { console.warn('[Global Library thumbnail discovery failed]'); }
+        }
+        if (!['GET', 'HEAD'].includes(request.method) && result.ok) {
+            const changedLibrary = path.match(/^\/api\/(?:v\d+\/)?(?:documents\/(?:d\/)?|blobelements\/d\/)([a-f0-9]{24})(?:\/|$)/)?.[1];
+            if (changedLibrary && globalLibraries.includes(changedLibrary)) {
+                try {
+                    const writeCache = await sharedCache(onshape.origin);
+                    if (writeCache) await invalidateLibrary(writeCache, url, changedLibrary);
+                } catch { console.warn('[Global Library cache invalidation failed]'); }
+            }
+        }
+        if (cache && key && result.status === 200 && !response.headers.has('Set-Cookie') &&
+            (library || /^image\//i.test(result.headers.get('Content-Type') || ''))) {
+            try {
+                // Parsing validates Blob contents before they become shared cache data.
+                if (library) await learnThumbnails(cache, url, library, await result.clone().json(), key);
+                const stored = result.clone();
+                const mutableThumbnail = /^\/api\/(?:v\d+\/)?thumbnails\/d\//.test(path) && !/\/v\/[a-f0-9]{24}\//.test(path);
+                const vendorLogo = globalLibraries.includes(path.match(/^\/api\/(?:v\d+\/)?thumbnails\/d\/([a-f0-9]{24})(?:\/|$)/)?.[1] || '');
+                const thumbnailTTL = mutableThumbnail && !vendorLogo ? 5 * 60 : 3 * 60 * 60;
+                const ttl = library ? libraryTTL : thumbnailTTL;
+                stored.headers.set('Cache-Control', 'public, max-age=' + ttl);
+                // Quota and cooldown belong to the user who made the upstream request.
+                stored.headers.delete('X-Rate-Limit-Remaining');
+                stored.headers.delete('Retry-After');
+                await cache.put(key, stored);
+                return cacheResult(result, 'MISS');
+            } catch { console.warn('[Global Library cache write failed]'); }
+        }
+        return cacheResult(result, 'BYPASS');
     }
 
     // These requests retrieve Onshape HTML/CSS to match the embedded panel style.
