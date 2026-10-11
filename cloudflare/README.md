@@ -103,6 +103,21 @@ They contain route categories instead of document IDs and omit query strings,
 headers, tokens, request/response bodies, and arbitrary exception messages. They
 are not uploaded or persisted. The normal PHP frontend does not include the drawer.
 
+For an intermittent insertion pause, click **Start insertion trace** in the drawer,
+reproduce one insertion, then click **Stop insertion trace**. The browser console
+logs `[Insert trace ...]` timestamps for lookup, choice/configuration UI, metadata,
+rate-limit checks, fetch/XHR, and insertion completion. A displayed choice followed
+by a later UI click can explain time spent selecting a part. Fetch timing ends at
+response headers; the surrounding app-method timing includes parsing and follow-up
+work. These logs do not measure when Onshape finishes rendering the new instance.
+
+In DevTools, select the Worker iframe in the console's JavaScript context dropdown.
+`insertTrace.start()` and `insertTrace.stop()` also control recording. Export the
+latest trace with `copy(insertTrace.report())` (Chrome/Edge DevTools), or evaluate
+`insertTrace.report()` and copy its string. The trace keeps at most 300 lines in
+browser memory and logs fixed method names and sanitized route categories only.
+Starting a trace clears its previous history.
+
 Use browser DevTools Network and consistent network conditions. Compare cold and
 repeat Global Library folder visits, searches, and published-part selections.
 Check deferred thumbnails while scrolling, fast navigation and breadcrumbs,

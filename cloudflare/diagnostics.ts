@@ -1,3 +1,5 @@
+import { installInsertionTrace } from './insertiontrace';
+
 type RequestRecord = { method: string; route: string; status: number; ms: number; error?: string };
 
 // Report route categories, never document IDs, query strings, headers, or bodies.
@@ -47,6 +49,7 @@ export class DiagnosticLog {
 }
 
 export function installDiagnostics(app: { failApp(reason: any): void }): void {
+    const trace = installInsertionTrace(app);
     const log = new DiagnosticLog();
     const drawer = document.createElement('details');
     drawer.id = 'test-diagnostics';
@@ -60,7 +63,15 @@ export function installDiagnostics(app: { failApp(reason: any): void }): void {
     clear.style.cssText = 'margin:4px 8px';
     const output = document.createElement('pre');
     output.style.cssText = 'white-space:pre-wrap;overflow:auto;max-height:30vh;margin:8px;font:11px monospace';
-    drawer.append(summary, clear, output);
+    const traceButton = document.createElement('button');
+    traceButton.type = 'button';
+    traceButton.textContent = 'Start insertion trace';
+    traceButton.style.cssText = 'margin:4px 8px';
+    traceButton.onclick = () => {
+        if (trace.active) trace.stop(); else trace.start();
+        traceButton.textContent = trace.active ? 'Stop insertion trace' : 'Start insertion trace';
+    };
+    drawer.append(summary, clear, traceButton, output);
     const render = () => {
         output.textContent = log.text();
         summary.textContent = 'Test diagnostics' + (log.startupFailed ? ' — startup failed' : '');
@@ -93,7 +104,9 @@ export function installDiagnostics(app: { failApp(reason: any): void }): void {
     XMLHttpRequest.prototype.send = function (...args: any[]) {
         const info = opened.get(this);
         const start = performance.now();
+        const end = trace.begin(`XHR ${info?.method || ''} ${info?.route || '[unknown route]'}`);
         if (info) this.addEventListener('loadend', () => {
+            end(`status ${this.status}`);
             let code: string | undefined;
             if (this.status >= 400 && (!this.responseType || this.responseType === 'text')) code = errorCode(this.responseText);
             record({ ...info, status: this.status, ms: Math.round(performance.now() - start), error: code });
@@ -107,11 +120,14 @@ export function installDiagnostics(app: { failApp(reason: any): void }): void {
         const route = requestLabel(request ? request.url : String(input), window.location.origin);
         const method = (init?.method || request?.method || 'GET').toUpperCase();
         const start = performance.now();
+        const end = trace.begin(`fetch ${method} ${route}`);
         try {
             const response = await originalFetch(input, init);
+            end(`status ${response.status}`);
             record({ method, route, status: response.status, ms: Math.round(performance.now() - start) });
             return response;
         } catch (cause) {
+            end('network failure');
             record({ method, route, status: 0, ms: Math.round(performance.now() - start) });
             throw cause;
         }

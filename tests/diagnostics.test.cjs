@@ -6,7 +6,7 @@ const ts = require('typescript');
 const exportsForTest = {};
 const source = fs.readFileSync(require.resolve('../cloudflare/diagnostics.ts'), 'utf8');
 const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
-vm.runInNewContext(code.outputText, { exports: exportsForTest, URL });
+vm.runInNewContext(code.outputText, { exports: exportsForTest, URL, require: () => ({}) });
 const { requestLabel, errorCode, DiagnosticLog } = exportsForTest;
 
 test('diagnostic labels omit query credentials, document IDs and external URLs', () => {
