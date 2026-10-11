@@ -9,6 +9,7 @@
     "cloudflare:dev": "npm run cloudflare:build && wrangler dev",
     "cloudflare:deploy": "npm run cloudflare:build && wrangler deploy",
     "cloudflare:check": "tsc -p cloudflare/tsconfig.json",
+    "test:php": "node --test tests/php-proxy.integration.cjs",
     "serve": "webpack serve --mode=development",
     "build": "webpack --mode=production --env=zip=y",
     "dev": "webpack --mode=development",
