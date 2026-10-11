@@ -37,6 +37,7 @@ test('OAuth exchange and refresh encode secrets and preserve upstream errors wit
     assert.equal(response.headers.get('Cache-Control'), 'no-store');
     assert.equal(await response.text(), '{"error":"invalid_grant"}');
     assert.equal(calls[0].url, 'https://oauth.onshape.com/oauth/token');
+    assert.equal(calls[0].init.redirect, 'manual');
     assert.equal(calls[0].init.body.get('code'), 'a+b');
     assert.equal(calls[0].init.body.get('client_secret'), 'test-secret');
     assert.equal(calls[0].init.body.get('redirect_uri'), uri);
@@ -52,6 +53,15 @@ test('OAuth refuses foreign callbacks and missing secrets before making upstream
     assert.equal((await run('/refresh.php?code=a', undefined, { ONSHAPE_CLIENT_SECRET: '' })).status, 503);
     assert.equal((await run('/refresh.php')).status, 400);
     assert.equal((await run('/oauth.php', { method: 'POST' })).status, 405);
+});
+
+test('OAuth and style helpers use workerd redirect mode and refuse upstream redirects', async () => {
+    const run = harness(async (url, init) => {
+        assert.equal(init.redirect, 'manual');
+        return Response.redirect('https://evil.example', 302);
+    });
+    assert.equal((await run('/oauth.php?code=test&redirect_uri=https://test.workers.dev/')).status, 502);
+    assert.equal((await run('/getfile.php?url=https://cad.onshape.com/css/test.css')).status, 502);
 });
 
 test('API proxy streams every write method and retains query, content type, status and rate limits', async () => {

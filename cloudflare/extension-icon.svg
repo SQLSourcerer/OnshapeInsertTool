@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Insert part</title>
+  <g fill="none" stroke="#374151" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 13 13 8l9 5v11l-9 5-9-5Z"/>
+    <path d="m4 13 9 5 9-5M13 18v11"/>
+  </g>
+  <path d="M27 3v11m-4-4 4 4 4-4" fill="none" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

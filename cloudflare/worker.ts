@@ -23,6 +23,16 @@ function redirect(target: URL): Response {
     return uncached(Response.redirect(target.toString(), 302));
 }
 
+async function fetchWithoutRedirect(url: string, init: RequestInit = {}): Promise<Response> {
+    // workerd supports follow/manual, but not the browser's redirect: 'error'.
+    const response = await fetch(url, { ...init, redirect: 'manual' });
+    if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel();
+        return error('Unexpected upstream redirect', 502);
+    }
+    return response;
+}
+
 async function route(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -76,8 +86,8 @@ async function route(request: Request, env: Env): Promise<Response> {
             body.set('grant_type', 'refresh_token');
             body.set('refresh_token', code);
         }
-        return uncached(await fetch(oauthOrigin + '/oauth/token', {
-            method: 'POST', body, redirect: 'error',
+        return uncached(await fetchWithoutRedirect(oauthOrigin + '/oauth/token', {
+            method: 'POST', body,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         }));
     }
@@ -118,7 +128,7 @@ async function route(request: Request, env: Env): Promise<Response> {
         if (!value) return error('Missing asset URL', 400);
         const target = new URL(value);
         if (target.origin !== onshape.origin || target.username || target.password) return error('Invalid asset origin', 400);
-        return uncached(await fetch(target.toString(), { redirect: 'error' }));
+        return uncached(await fetchWithoutRedirect(target.toString()));
     }
     if (path.startsWith('/confirm_access')) {
         const target = new URL(url.pathname + url.search, oauthOrigin);
@@ -139,6 +149,8 @@ export default {
         } catch (cause) {
             // Do not log request URLs, authorization headers, or token responses.
             if (cause instanceof TypeError && /Invalid URL/i.test(cause.message)) return error('Invalid URL', 400);
+            console.error('Upstream failure:', cause instanceof Error
+                ? cause.message.replace(/https?:\/\/\S+/g, '[URL]') : 'Unknown error');
             return error('Upstream request failed', 502);
         }
     },
