@@ -162,10 +162,13 @@ header cannot opt a private resource into this cache.
 API requests still require a bearer header and the configured Onshape origin.
 Shared cache hits bypass Onshape permission checks, so only documents intentionally
 public to all app users belong in the allowlist. OAuth, insertion and other writes,
-partial/conditional reads, errors, cookie-bearing responses, malformed library
+partial/conditional reads, errors, malformed library
 JSON, and non-image thumbnail responses bypass the shared cache. Responses sent
 to browsers retain `Cache-Control: no-store`. Cached responses omit the originating
-user's rate-limit/cooldown headers. Cache failures fall back to normal proxying.
+user's rate-limit/cooldown headers. Onshape can set cookies on public responses;
+the proxy strips them before returning or storing approved shared content. Cookies
+do not make private resources eligible for caching. Cache failures fall back to
+normal proxying.
 
 A successful write through this Worker to an allowlisted library clears its known
 cached Blob downloads and thumbnail membership in the serving data center. Writes

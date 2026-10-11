@@ -237,8 +237,7 @@ async function route(request: Request, env: Env): Promise<Response> {
         }
         const result = new Response(response.body, { status: response.status, statusText: response.statusText, headers: resultHeaders });
         // Learn vendor thumbnail URLs without sharing user-specific document summaries.
-        if (request.method === 'GET' && result.status === 200 && summaryLibrary && globalLibraries.includes(summaryLibrary) &&
-            !response.headers.has('Set-Cookie')) {
+        if (request.method === 'GET' && result.status === 200 && summaryLibrary && globalLibraries.includes(summaryLibrary)) {
             try {
                 const summaryCache = await sharedCache(onshape.origin);
                 if (summaryCache) {
@@ -257,7 +256,8 @@ async function route(request: Request, env: Env): Promise<Response> {
                 } catch { console.warn('[Global Library cache invalidation failed]'); }
             }
         }
-        if (cache && key && result.status === 200 && !response.headers.has('Set-Cookie') &&
+        // Onshape sets cookies even for public content; resultHeaders already strips them.
+        if (cache && key && result.status === 200 &&
             (library || /^image\//i.test(result.headers.get('Content-Type') || ''))) {
             try {
                 // Parsing validates Blob contents before they become shared cache data.

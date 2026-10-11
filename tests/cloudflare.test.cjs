@@ -184,8 +184,8 @@ test('cache variants preserve queries and Accept, while private, tenant, conditi
     assert.equal(tenant.headers.get('X-Global-Library-Cache'), 'BYPASS');
 });
 
-test('failed, partial, cookie-bearing, malformed and non-image responses never enter the shared cache', async () => {
-    for (const options of [{ status: 403 }, { status: 429 }, { status: 503 }, { status: 206 }, { headers: { 'Set-Cookie': 'private=1' } }, {}]) {
+test('failed, partial, malformed and non-image responses never enter the shared cache', async () => {
+    for (const options of [{ status: 403 }, { status: 429 }, { status: 503 }, { status: 206 }, {}]) {
         const cache = memoryCache();
         let calls = 0;
         const run = harness(async () => { calls++; return new Response('not JSON', options); }, [], cache);
@@ -200,6 +200,34 @@ test('failed, partial, cookie-bearing, malformed and non-image responses never e
     await run(path, user('a')); await run(path, user('b'));
     assert.equal(calls, 2);
     assert.equal(cache.entries.size, 0);
+});
+
+test('public library files and thumbnails cache despite upstream cookies, without storing or forwarding cookies', async () => {
+    const cache = memoryCache();
+    let calls = 0;
+    const run = harness(async url => {
+        calls++;
+        const image = url.includes('/thumbnails/');
+        return new Response(image ? 'image' : '{}', {
+            headers: { 'Content-Type': image ? 'image/png' : 'application/json', 'Set-Cookie': 'upstream-session=secret' },
+        });
+    }, [], cache);
+    for (const path of [blobPath, '/api/thumbnails/d/' + libraryId + '/s/70x40']) {
+        const first = await run(path, user('alice'));
+        assert.equal(first.headers.get('X-Global-Library-Cache'), 'MISS');
+        assert.equal(first.headers.get('Set-Cookie'), null);
+        const second = await run(path, user('bob'));
+        assert.equal(second.headers.get('X-Global-Library-Cache'), 'HIT');
+        assert.equal(second.headers.get('Set-Cookie'), null);
+    }
+    assert.equal(calls, 2);
+    for (const { response } of cache.entries.values()) assert.equal(response.headers.get('Set-Cookie'), null);
+    for (let i = 0; i < 2; i++) {
+        const privateResponse = await run(blobPath.replace(libraryId, documentId), user('bob'));
+        assert.equal(privateResponse.headers.get('X-Global-Library-Cache'), 'BYPASS');
+        assert.equal(privateResponse.headers.get('Set-Cookie'), null);
+    }
+    assert.equal(calls, 4);
 });
 
 test('cache failures fall back to upstream without breaking successful responses', async () => {
@@ -245,7 +273,7 @@ test('vendor document summaries teach opaque thumbnail URLs without caching pers
         if (url.includes('/documents/')) return new Response(JSON.stringify({
             userSpecific: init.headers.get('Authorization'), thumbnail: { sizes: [{ href: 'https://cad.onshape.com' + opaque }] },
             userSpecificUrl: 'https://cad.onshape.com/documents/' + documentId,
-        }));
+        }), { headers: { 'Set-Cookie': 'upstream-session=secret' } });
         return new Response('image', { headers: { 'Content-Type': 'image/png' } });
     }, [], cache);
     const path = '/api/documents/' + libraryId;
