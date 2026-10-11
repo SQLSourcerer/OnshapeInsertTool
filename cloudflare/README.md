@@ -131,6 +131,14 @@ cache behavior. Cloudflare still serves static assets through its CDN. The free
 plan has CPU and request limits; watch Worker metrics during testing. Live OAuth
 and document writes must be validated against your test account after deployment.
 
+For thumbnail redirect failures, the testing Worker logs `[Thumbnail redirect]`
+with the upstream status and destination hostname and path. Query strings,
+fragments, URL credentials, and path segments of 24 or more characters are omitted
+or redacted. Missing or invalid destinations are logged as `null`. Redirects
+remain blocked. Use `npx wrangler tail --format=json` while reopening the affected
+library to capture these temporary diagnostics; a browser HAR cannot show the
+upstream redirect destination.
+
 Cloudflare references: [Static Assets](https://developers.cloudflare.com/workers/static-assets/),
 [secrets](https://developers.cloudflare.com/workers/configuration/secrets/),
 [limits](https://developers.cloudflare.com/workers/platform/limits/).

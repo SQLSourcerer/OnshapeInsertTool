@@ -110,6 +110,20 @@ async function route(request: Request, env: Env): Promise<Response> {
         });
         // Never forward the bearer token to an upstream redirect destination.
         if (response.status >= 300 && response.status < 400) {
+            if (/^\/api\/(?:v\d+\/)?thumbnails\//.test(path)) {
+                let destination: { host: string; path: string } | null = null;
+                try {
+                    const location = response.headers.get('Location');
+                    if (location) {
+                        const url = new URL(location, target);
+                        destination = {
+                            host: url.hostname,
+                            path: url.pathname.split('/').map(part => part.length >= 24 ? ':id' : part).join('/'),
+                        };
+                    }
+                } catch { /* Never log an unparsed Location value. */ }
+                console.warn('[Thumbnail redirect]', { status: response.status, destination });
+            }
             await response.body?.cancel();
             return error('Unexpected Onshape API redirect', 502);
         }

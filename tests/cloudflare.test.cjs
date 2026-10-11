@@ -4,11 +4,13 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 const ts = require('typescript');
 
-function harness(fetch = () => { throw new Error('Unexpected upstream request'); }) {
+function harness(fetch = () => { throw new Error('Unexpected upstream request'); }, logs = []) {
     const exports = {};
     const source = fs.readFileSync(require.resolve('../cloudflare/worker.ts'), 'utf8');
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
-    vm.runInNewContext(code.outputText, { exports, URL, URLSearchParams, Request, Response, Headers, TypeError, fetch });
+    vm.runInNewContext(code.outputText, { exports, URL, URLSearchParams, Request, Response, Headers, TypeError, fetch,
+        console: { warn: (...args) => logs.push(args), error() {} },
+    });
     const env = {
         ONSHAPE_CLIENT_ID: 'test-client', ONSHAPE_CLIENT_SECRET: 'test-secret',
         ONSHAPE_ORIGIN: 'https://cad.onshape.com',
@@ -105,6 +107,34 @@ test('API proxy rejects arbitrary upstreams, missing tokens and redirected API r
     assert.equal((await run('/api/users')).status, 401);
     const redirected = harness(async () => Response.redirect('https://evil.example', 302));
     assert.equal((await redirected('/api/users', { headers: { Authorization: 'Bearer a' } })).status, 502);
+});
+
+test('thumbnail redirects log only sanitized destinations and remain blocked', async () => {
+    for (const location of [
+        'https://username:password@images.onshape.com/api/thumbnails/' + 'a'.repeat(24) + '/s/70x40?signature=private#fragment',
+        '/api/thumbnails/' + 'b'.repeat(24) + '/s/70x40?token=private',
+        'http://[', null,
+    ]) {
+        const logs = [];
+        let calls = 0;
+        const run = harness(async () => {
+            calls++;
+            return new Response(null, { status: 307, headers: location ? { Location: location } : {} });
+        }, logs);
+        const response = await run('/api/thumbnails/d/' + 'c'.repeat(24) + '/s/70x40', {
+            headers: { Authorization: 'Bearer sensitive-token' },
+        });
+        assert.equal(response.status, 502);
+        assert.equal(calls, 1);
+        assert.equal(logs.length, 1);
+        assert.equal(logs[0][0], '[Thumbnail redirect]');
+        assert.equal(logs[0][1].status, 307);
+        if (location && location !== 'http://[') {
+            assert.equal(logs[0][1].destination.host, location.startsWith('/') ? 'cad.onshape.com' : 'images.onshape.com');
+            assert.equal(logs[0][1].destination.path, '/api/thumbnails/:id/s/70x40');
+        } else assert.equal(logs[0][1].destination, null);
+        assert.doesNotMatch(JSON.stringify(logs), /username|password|private|fragment|sensitive-token|a{24}|b{24}|c{24}/);
+    }
 });
 
 test('Onshape CSS helper and sign-in only accept configured Onshape origin', async () => {
