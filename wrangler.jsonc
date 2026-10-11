@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "onshape-inserttool-test",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-10-11",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./dist-cloudflare",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "vars": {
+    "ONSHAPE_ORIGIN": "https://cad.onshape.com"
+  }
+}

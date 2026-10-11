@@ -34,6 +34,8 @@ In order to be configured in Onshape you need to:
 
 ## Normal Development
 
+For a separate Cloudflare Workers test deployment, see [Cloudflare testing](cloudflare/README.md).
+
 1. Once you are happy, you can do an `npm run deploy` to automatically copy all of the files to your server.
 2. As a convenince you can also do `npm run deploy-dev` to build and deploy the development version of the code or `npm run deploy-prod` to deploy the production (mininized) version.
 
