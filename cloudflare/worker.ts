@@ -82,8 +82,14 @@ async function thumbnailEligible(cache: Cache, url: URL): Promise<boolean> {
         ((document && entry.documents.includes(document)) || entry.thumbnails.includes(url.pathname + url.search))));
 }
 
-function cacheResult(response: Response, state: string): Response {
+function cacheResult(response: Response, state: string, publicThumbnail = false): Response {
     const result = uncached(response);
+    if (publicThumbnail) {
+        result.headers.set('Cache-Control', response.headers.get('Cache-Control') || 'no-store');
+        result.headers.set('Vary', 'Accept');
+        result.headers.delete('X-Rate-Limit-Remaining');
+        result.headers.delete('Retry-After');
+    }
     result.headers.set('X-Global-Library-Cache', state);
     return result;
 }
@@ -193,7 +199,7 @@ async function route(request: Request, env: Env): Promise<Response> {
                     const hit = await cache.match(key);
                     if (hit) {
                         if (library) await learnThumbnails(cache, url, library, await hit.clone().json(), key);
-                        return cacheResult(hit, 'HIT');
+                        return cacheResult(hit, 'HIT', thumbnail);
                     }
                 }
             } catch { console.warn('[Global Library cache read failed]'); cache = undefined; key = undefined; }
@@ -256,6 +262,8 @@ async function route(request: Request, env: Env): Promise<Response> {
                 } catch { console.warn('[Global Library cache invalidation failed]'); }
             }
         }
+        const publicThumbnail = !!(cache && key && thumbnail && result.status === 200 &&
+            /^image\//i.test(result.headers.get('Content-Type') || ''));
         // Onshape sets cookies even for public content; resultHeaders already strips them.
         if (cache && key && result.status === 200 &&
             (library || /^image\//i.test(result.headers.get('Content-Type') || ''))) {
@@ -267,15 +275,16 @@ async function route(request: Request, env: Env): Promise<Response> {
                 const vendorLogo = globalLibraries.includes(path.match(/^\/api\/(?:v\d+\/)?thumbnails\/d\/([a-f0-9]{24})(?:\/|$)/)?.[1] || '');
                 const thumbnailTTL = mutableThumbnail && !vendorLogo ? 5 * 60 : 3 * 60 * 60;
                 const ttl = library ? libraryTTL : thumbnailTTL;
+                if (publicThumbnail) result.headers.set('Cache-Control', 'public, max-age=' + ttl);
                 stored.headers.set('Cache-Control', 'public, max-age=' + ttl);
                 // Quota and cooldown belong to the user who made the upstream request.
                 stored.headers.delete('X-Rate-Limit-Remaining');
                 stored.headers.delete('Retry-After');
                 await cache.put(key, stored);
-                return cacheResult(result, 'MISS');
+                return cacheResult(result, 'MISS', publicThumbnail);
             } catch { console.warn('[Global Library cache write failed]'); }
         }
-        return cacheResult(result, 'BYPASS');
+        return cacheResult(result, 'BYPASS', publicThumbnail);
     }
 
     // These requests retrieve Onshape HTML/CSS to match the embedded panel style.

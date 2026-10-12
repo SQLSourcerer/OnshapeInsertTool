@@ -163,9 +163,13 @@ API requests still require a bearer header and the configured Onshape origin.
 Shared cache hits bypass Onshape permission checks, so only documents intentionally
 public to all app users belong in the allowlist. OAuth, insertion and other writes,
 partial/conditional reads, errors, malformed library
-JSON, and non-image thumbnail responses bypass the shared cache. Responses sent
-to browsers retain `Cache-Control: no-store`. Cached responses omit the originating
-user's rate-limit/cooldown headers. Onshape can set cookies on public responses;
+JSON, and non-image thumbnail responses bypass the shared cache. Approved public
+thumbnail responses allow browser and intermediary caching with the same TTL as
+the backend (`public, max-age=10800` or `public, max-age=300`) and `Vary: Accept`.
+Both thumbnail cache misses and hits omit user rate-limit/cooldown headers.
+Library JSON and other API responses retain `Cache-Control: no-store` for browsers;
+backend-cached copies omit the originating user's rate-limit/cooldown headers.
+Onshape can set cookies on public responses;
 the proxy strips them before returning or storing approved shared content. Cookies
 do not make private resources eligible for caching. Cache failures fall back to
 normal proxying.

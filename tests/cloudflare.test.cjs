@@ -156,6 +156,44 @@ test('version-specific and thumbnail-ID images remain cached for three hours wit
     assert.equal(imageCalls, 4);
 });
 
+test('only approved public thumbnails expose browser cache TTLs, omit quota headers and vary by Accept', async () => {
+    const cache = memoryCache();
+    const opaque = '/api/thumbnails/' + 'd'.repeat(40) + '/s/70x40';
+    const versioned = thumbnailPath.replace('/s/', '/v/' + 'f'.repeat(24) + '/s/');
+    const vendor = '/api/thumbnails/d/' + libraryId + '/s/70x40';
+    const run = harness(async url => new Response(url.includes('/blobelements/') ? JSON.stringify({ children: [
+        { jsonType: 'document-summary', id: documentId, thumbnail: { sizes: [{ href: 'https://cad.onshape.com' + opaque }] } },
+    ] }) : 'image', { headers: {
+        'Content-Type': url.includes('/blobelements/') ? 'application/json' : 'image/png',
+        'X-Rate-Limit-Remaining': '12', 'Retry-After': '7', 'Set-Cookie': 'upstream-session=secret',
+    } }), [], cache);
+    const blob = await run(blobPath, user('alice'));
+    assert.equal(blob.headers.get('Cache-Control'), 'no-store');
+    assert.equal((await run(blobPath, user('bob'))).headers.get('Cache-Control'), 'no-store');
+    for (const [path, ttl] of [[vendor, 10800], [versioned, 10800], [opaque, 10800], [thumbnailPath, 300]]) {
+        for (const [token, state] of [['alice', 'MISS'], ['bob', 'HIT']]) {
+            const result = await run(path, user(token));
+            assert.equal(result.headers.get('X-Global-Library-Cache'), state);
+            assert.equal(result.headers.get('Cache-Control'), 'public, max-age=' + ttl);
+            assert.equal(result.headers.get('Vary'), 'Accept');
+            assert.equal(result.headers.get('X-Rate-Limit-Remaining'), null);
+            assert.equal(result.headers.get('Retry-After'), null);
+            assert.equal(result.headers.get('Set-Cookie'), null);
+        }
+    }
+    const variant = await run(vendor, { headers: { Authorization: 'Bearer bob', Accept: 'image/webp' } });
+    assert.equal(variant.headers.get('X-Global-Library-Cache'), 'MISS');
+    assert.equal(variant.headers.get('Vary'), 'Accept');
+    const privateImage = await run(thumbnailPath.replace(documentId, 'e'.repeat(24)), user('bob'));
+    assert.equal(privateImage.headers.get('Cache-Control'), 'no-store');
+    assert.equal(privateImage.headers.get('X-Rate-Limit-Remaining'), '12');
+    // Cache API age information survives so downstream caches can account for freshness.
+    for (const [key, entry] of cache.entries) {
+        if (new URL(key).searchParams.get('resource') === 'https://cad.onshape.com' + vendor) entry.response.headers.set('Age', '120');
+    }
+    assert.equal((await run(vendor, user('bob'))).headers.get('Age'), '120');
+});
+
 test('cache variants preserve queries and Accept, while private, tenant, conditional and write requests bypass', async () => {
     const cache = memoryCache();
     const calls = [];
