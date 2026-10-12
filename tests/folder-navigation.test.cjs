@@ -22,6 +22,75 @@ function load(file, dependencies = {}, globals = {}) {
 
 const { RequestCache } = load('app/common/requestcache.ts');
 
+function workspaceHarness() {
+    let now = 0;
+    const clock = { now: () => now };
+    const cache = load('app/common/requestcache.ts', {}, { Date: clock });
+    const { OnshapeAPI } = load('app/onshapeapi.ts', { './common/requestcache': cache });
+    const preferences = load('app/preferences.ts', {
+        'onshape-typescript-fetch': {
+            BTGlobalTreeNodeInfoFromJSONTyped: value => value,
+            GetAssociativeDataWvmEnum: { w: 'w' },
+        },
+        'onshape-typescript-fetch/runtime': { exists: (value, key) => value[key] !== undefined },
+    });
+    const { Library } = load('app/libraries.ts', {
+        './preferences': preferences,
+        'onshape-typescript-fetch/apis/AppAssociativeDataApi': { GetAssociativeDataWvmEnum: { w: 'w' } },
+    });
+    const onshape = new OnshapeAPI();
+    const library = new Library(onshape);
+    const prefs = new preferences.Preferences(onshape);
+    prefs.findPreferencesDoc = async () => ({ id: 'doc', name: '⚙ Preferences ⚙', owner: { id: 'user' } });
+    return { onshape, library, prefs, advance: ms => { now += ms; } };
+}
+
+test('library and preferences share concurrent workspace lookups, scoped by document and bounded by expiry', async () => {
+    const { onshape, library, prefs, advance } = workspaceHarness();
+    const reads = [];
+    onshape.documentApi = { getDocumentWorkspaces: async ({ did }) => {
+        reads.push(did);
+        return [{ id: did + '-workspace-' + reads.length }, { id: 'other-workspace' }];
+    } };
+    const query = { items: [{ id: 'doc', name: 'Library' }] };
+    const [proxy, preferences] = await Promise.all([
+        library.getProxyDocumentFromQuery(query), prefs.getPreferencesDoc(),
+    ]);
+    assert.equal(proxy.wvmid, 'doc-workspace-1');
+    assert.equal(preferences.wvmid, proxy.wvmid);
+    assert.equal(proxy.wvm, 'w');
+    assert.deepEqual(reads, ['doc']);
+    proxy.wvmid = 'mutated';
+    advance(5 * 60 * 1000 - 1);
+    assert.equal((await library.getProxyDocumentFromQuery(query)).wvmid, 'doc-workspace-1');
+    assert.equal(await onshape.getDocumentWorkspaceId('different'), 'different-workspace-2');
+    advance(1);
+    assert.equal((await prefs.getPreferencesDoc()).wvmid, 'doc-workspace-3');
+    assert.deepEqual(reads, ['doc', 'different', 'doc']);
+    const separate = workspaceHarness().onshape;
+    separate.documentApi = { getDocumentWorkspaces: async () => [{ id: 'separate-session' }] };
+    assert.equal(await separate.getDocumentWorkspaceId('doc'), 'separate-session');
+});
+
+test('failed and empty workspace lookups propagate and retry through both callers', async () => {
+    for (const failure of [new Error('network unavailable'), [], [{}], undefined]) {
+        const { onshape, library, prefs } = workspaceHarness();
+        let reads = 0;
+        onshape.documentApi = { getDocumentWorkspaces: async () => {
+            reads++;
+            if (reads === 1) {
+                if (failure instanceof Error) throw failure;
+                return failure;
+            }
+            return [{ id: 'recovered' }];
+        } };
+        await assert.rejects(library.getProxyDocumentFromQuery({ items: [{ id: 'doc' }] }),
+            /network unavailable|no available workspace/);
+        assert.equal((await prefs.getPreferencesDoc()).wvmid, 'recovered');
+        assert.equal(reads, 2);
+    }
+});
+
 test('failed library root, folder and search downloads are retried after recovery', async () => {
     const { Preferences } = load('app/preferences.ts');
     const { Library } = load('app/libraries.ts', { './preferences': { Preferences } });
@@ -59,12 +128,13 @@ test('failed library root, folder and search downloads are retried after recover
     assert.equal(reads, recoveredReads);
 });
 
-test('default browsing cache reuses reads for 5 minutes without extending expiry on access', async () => {
+test('concurrent and repeat browsing reads share a request for 5 minutes without extending expiry', async () => {
     let now = 0;
     let calls = 0;
     const cache = new RequestCache(undefined, 64, () => now);
     const read = () => Promise.resolve(++calls);
-    await cache.get('folder', read);
+    const results = await Promise.all([cache.get('folder', read), cache.get('folder', read)]);
+    assert.deepEqual(results, [1, 1]);
     now = 30000;
     await cache.get('folder', read);
     now = 5 * 60 * 1000 - 1;
@@ -220,21 +290,6 @@ test('App coalesces breadcrumb saves and flushes pending work when hidden', asyn
     assert.equal(JSON.stringify(saved), '[[{"id":"b"}],[{"id":"c"}]]');
     await advance(1000);
     assert.equal(saved.length, 2);
-});
-
-test('repeat and concurrent folder reads share a request, then expire', async () => {
-    let now = 0;
-    let calls = 0;
-    const cache = new RequestCache(30, 2, () => now);
-    const read = () => { calls++; return Promise.resolve({ items: [] }); };
-    const first = cache.get('folder', read);
-    assert.equal(cache.get('folder', read), first);
-    await first;
-    assert.equal(await cache.get('folder', read), await first);
-    assert.equal(calls, 1);
-    now = 30;
-    await cache.get('folder', read);
-    assert.equal(calls, 2);
 });
 
 test('failed reads can be retried and least recently used pages are evicted', async () => {
@@ -402,26 +457,32 @@ test('global library reads are cached for 3 hours, personal reads stay fresh', a
     now++;
     await app.getGlobalLibraryRead('global', 'folder:global:child', read);
     assert.equal(calls, 2);
-    app.libraries.browseRevision++;
-    await app.getGlobalLibraryRead('global', 'folder:global:child', read);
-    assert.equal(calls, 3);
     await app.getGlobalLibraryRead('personal', 'folder:personal:child', read);
     await app.getGlobalLibraryRead('personal', 'folder:personal:child', read);
-    assert.equal(calls, 5);
+    assert.equal(calls, 4);
     app.currentBreadcrumbs = [{ id: 'GL' }];
     await app.getGlobalLibraryRead('nested', 'library:nested', read);
     app.currentBreadcrumbs = [];
     await app.getGlobalLibraryRead('nested', 'library:nested', read);
-    assert.equal(calls, 6);
+    assert.equal(calls, 5);
 });
 
 test('library writes invalidate browsing reads before and after completion', async () => {
     const { Library } = load('app/libraries.ts', {
         './preferences': { Preferences: class {} },
     });
+    const { App } = load('app/app.ts', {
+        './baseapp': { BaseApp: class {} },
+        './common/requestcache': { RequestCache },
+    });
     const library = Object.create(Library.prototype);
     library.browseRevision = 0;
     library.getAppElement = async () => ({ id: 'folder' });
+    const app = Object.create(App.prototype);
+    app.libraries = library;
+    app.globalLibrariesNodes = ['global'];
+    let contents;
+    const read = () => app.getGlobalLibraryRead('global', 'folder', async () => contents);
     let finish;
     library.setBTGArray = () => new Promise((resolve) => { finish = resolve; });
     for (const write of [
@@ -429,13 +490,19 @@ test('library writes invalidate browsing reads before and after completion', asy
         () => library.setProxyFolder({ id: 'global' }, { id: 'folder' }, []),
         () => library.setLibrarySearchInfo([], { id: 'global' }),
     ]) {
-        const before = library.browseRevision;
+        app.globalLibraryReads = new RequestCache();
+        contents = 'before write';
+        assert.equal(await read(), 'before write');
+        contents = 'during write';
         const pending = write();
-        assert.equal(library.browseRevision, before + 1);
+        assert.equal(await read(), 'during write');
         await new Promise(setImmediate);
+        contents = 'after write';
         finish(true);
         await pending;
-        assert.equal(library.browseRevision, before + 2);
+        assert.equal(await read(), 'after write');
+        contents = 'uncached change';
+        assert.equal(await read(), 'after write');
     }
 });
 
