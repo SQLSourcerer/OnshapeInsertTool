@@ -103,6 +103,7 @@ export type onshapeConfig = {
     code?: string;
     myserver?: string;
     failApp?: failAppFunc;
+    fetchOverride?: runtime.FetchAPI;
 };
 /**
  * BaseApp contains all the support routines that your application will need.
@@ -113,6 +114,7 @@ export type onshapeConfig = {
 export class OnshapeAPI {
     private workspaceIdCache = new RequestCache<string>();
     private thumbnailCache = new RequestCache<string>(60000, 100);
+    private fetchOverride?: runtime.FetchAPI;
     private pendingThumbnails = new Map<Element, () => void>();
     private thumbnailObserver: IntersectionObserver;
 
@@ -201,6 +203,7 @@ export class OnshapeAPI {
 
     // Initializes the object
     constructor(config: onshapeConfig) {
+        this.fetchOverride = config?.fetchOverride;
         if (config !== undefined) {
             if (config.documentId !== undefined) {
                 this.documentId = config.documentId;
@@ -363,6 +366,7 @@ export class OnshapeAPI {
         this.expires_token = expires;
 
         const uriconfigparams: runtime.ConfigurationParameters = {
+            fetchApi: this.fetchOverride,
             basePath: myserver, // override base path
             accessToken: (name?: string, scopes?: string[]): Promise<string> => {
                 return this.getAccessToken();
@@ -450,6 +454,22 @@ export class OnshapeAPI {
     }
 
     private fetchThumbnail(urlReq: string): Promise<string> {
+        if (this.fetchOverride) {
+            return this.fetchOverride(this.myserver + this.fixOnshapeURI(urlReq), { headers: {
+                Authorization: 'Bearer ' + this.access_token, 'X-Server': this.server,
+                Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            } }).then(async response => {
+                if (response.status !== 200) throw new Error('Thumbnail request failed: ' + response.status);
+                const blob = await response.blob();
+                if (!blob.size || blob.type === 'text/xml' || blob.type === 'application/json') throw new Error('Not Found');
+                return new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onerror = () => reject(reader.error);
+                    reader.onload = () => resolve(String(reader.result));
+                    reader.readAsDataURL(blob);
+                });
+            });
+        }
         return new Promise((resolve, reject) => {
             let xhr = new XMLHttpRequest();
 

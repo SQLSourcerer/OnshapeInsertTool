@@ -1,4 +1,8 @@
-interface Env {
+import { cacheConfigured, coordinatedRead, PublicCacheEnv } from './globalcache';
+import { imageDocument, publicLibraries as globalLibraries } from './publicresources';
+export { GlobalLibraryRefresh } from './globalcache';
+
+interface Env extends PublicCacheEnv {
     ASSETS: { fetch(request: Request): Promise<Response> };
     ONSHAPE_CLIENT_ID: string;
     ONSHAPE_CLIENT_SECRET: string;
@@ -6,12 +10,6 @@ interface Env {
 }
 
 const oauthOrigin = 'https://oauth.onshape.com';
-// Keep aligned with app.ts; these library documents contain public, shared data.
-const globalLibraries = [
-    '2fd951db6d0261aba5f16a5d', '65d1b86ea725f780582d9dd0', 'f4aa6bf18a572782640d6476',
-    'f3b99a8450b4f983b1efa03c', 'b71490095d0a6e87f29c4975', '1348b49fc35396eed14d589b',
-    '48ccfa30daa8fc8dad88f0eb', 'ef69c7f97eac419fe24faf1d', '07986b342f5e967bbfd021f8',
-];
 const libraryTTL = 15 * 60;
 type Membership = Record<string, { expires: number; documents: string[]; thumbnails: string[]; responses: string[] }>;
 
@@ -123,6 +121,11 @@ async function fetchWithoutRedirect(url: string, init: RequestInit = {}): Promis
 async function route(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    if (path === '/public-cache-config.json' && request.method === 'GET') {
+        return new Response(JSON.stringify({ origin: cacheConfigured(env) ? new URL(env.PUBLIC_LIBRARY_CACHE_ORIGIN!).origin : '', now: Date.now() }), {
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+    }
     const onshape = new URL(env.ONSHAPE_ORIGIN);
     if (onshape.protocol !== 'https:' || onshape.username || onshape.password ||
         onshape.pathname !== '/' || onshape.search || onshape.hash) {
@@ -189,8 +192,18 @@ async function route(request: Request, env: Env): Promise<Response> {
         let cache: Cache | undefined;
         let key: Request | undefined;
         const library = blobLibrary && globalLibraries.includes(blobLibrary) ? blobLibrary : undefined;
+        const directCache = cacheConfigured(env);
+        const publicImage = thumbnail && (request.headers.has('X-Public-Library-Source') || globalLibraries.includes(imageDocument(path)));
+        if (directCache && request.method === 'GET' && (library || publicImage) &&
+            !['Range', 'If-Match', 'If-None-Match', 'If-Modified-Since'].some(name => request.headers.has(name))) {
+            try {
+                const shared = await coordinatedRead(request, env);
+                if (shared.status !== 412) return shared;
+                await shared.body?.cancel();
+            } catch { console.warn('[Public library refresh unavailable]'); }
+        }
         // Partial and conditional requests retain upstream semantics.
-        if (request.method === 'GET' && !['Range', 'If-Match', 'If-None-Match', 'If-Modified-Since'].some(name => request.headers.has(name)) &&
+        if (!directCache && request.method === 'GET' && !['Range', 'If-Match', 'If-None-Match', 'If-Modified-Since'].some(name => request.headers.has(name)) &&
             (library || thumbnail)) {
             cache = await sharedCache(onshape.origin);
             try {
@@ -243,7 +256,7 @@ async function route(request: Request, env: Env): Promise<Response> {
         }
         const result = new Response(response.body, { status: response.status, statusText: response.statusText, headers: resultHeaders });
         // Learn vendor thumbnail URLs without sharing user-specific document summaries.
-        if (request.method === 'GET' && result.status === 200 && summaryLibrary && globalLibraries.includes(summaryLibrary)) {
+        if (!directCache && request.method === 'GET' && result.status === 200 && summaryLibrary && globalLibraries.includes(summaryLibrary)) {
             try {
                 const summaryCache = await sharedCache(onshape.origin);
                 if (summaryCache) {

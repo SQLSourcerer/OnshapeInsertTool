@@ -1,8 +1,9 @@
 # Cloudflare testing
 
 This deployment runs the Insert Tool frontend and a stateless TypeScript backend
-on one Cloudflare Worker. It retains the frontend's PHP endpoint names, but no PHP
-runtime, database, or persistent disk is required. The normal PHP build remains available.
+on one Cloudflare Worker. It retains the frontend's PHP endpoint names without a PHP
+runtime or server disk. Optional public-library caching uses R2 and Durable Objects.
+The normal PHP build remains available.
 
 ## Branch workflow
 
@@ -144,8 +145,89 @@ deployment.
 
 ## Shared Global Library caching
 
-The Worker uses Cloudflare's Cache API for the nine public library documents listed
-in `app/app.ts`. A test checks that its allowlist matches the frontend. This allowlist
+### Direct R2/CDN reads and global refresh coordination
+
+Set `PUBLIC_LIBRARY_CACHE_ORIGIN` in `wrangler.jsonc` to the bucket's HTTPS origin
+(`r2.dev` for development, or a custom domain for CDN caching) to enable direct reads
+of public library JSON and thumbnails. Leave it empty to use
+the existing Cache API behavior described below. The PHP build does not use this
+transport. Existing frontend response caches and their TTLs are unchanged.
+
+The browser reads `/public-cache-config.json` once when it first needs a public
+resource. That supplies the cache origin and synchronizes its clock. It then computes
+an R2 key from the API path, query, representation and current ten-minute UTC window.
+JSON uses a single validated JSON representation; images vary by `Accept`.
+Reads go directly to the bucket without bearer tokens, cookies or referrers.
+Missing, inaccessible or invalid objects fall back to the authenticated Worker API.
+
+The Worker routes each public resource to a Durable Object named by its resource
+hash. Requests from every region for that name share one in-flight Onshape fetch.
+The object checks R2 first, validates a successful response, writes it to R2, and
+returns independent responses to waiting callers. A new window uses a new key and
+refreshes only on demand. This is a fixed-window maximum age, not ten minutes from
+each first access. A fill crossing a boundary remains in the earlier window.
+There is no proactive crawl. The object stores no tokens or response data in its
+SQLite storage; R2 holds the public responses. Restarts may cause duplicate fetches.
+
+Only JSON Blob downloads from the nine allowlisted library documents and images
+verified through those public payloads qualify. The frontend remembers which JSON
+introduced each document or image and sends that source path on a thumbnail miss.
+The object independently fetches the current source through its own coordinator
+before trusting membership. Vendor document summaries contribute only their
+thumbnail field; personalized summary fields are never published. Errors, invalid
+JSON, non-images and responses over 16 MiB are not stored. API fallback responses
+use `no-store`; stored objects contain only content type and cache lifetime, never
+upstream cookies, credentials, rate-limit or cooldown headers. Enterprise origins,
+private resources, conditional/partial requests and writes retain normal proxying.
+When this mode is enabled, the older shared Cache API is bypassed.
+
+The public bucket must be dedicated to this cache. Provision it before deploying:
+
+```sh
+npx wrangler r2 bucket create onshape-global-library-cache
+npx wrangler r2 bucket cors set onshape-global-library-cache --file cloudflare/r2-cors.json
+npx wrangler r2 bucket lifecycle add onshape-global-library-cache expire-cache-windows global-library/ --expire-days 1
+```
+
+The read-only CORS policy allows any origin because all published data is public;
+it does not allow browser writes. Connect a custom hostname to the bucket in R2
+Settings, then set `PUBLIC_LIBRARY_CACHE_ORIGIN` to its HTTPS origin. Do not route
+that hostname through the Worker. For initial development, enable the bucket's
+generated `r2.dev` URL instead and use that HTTPS origin; no custom domain is needed.
+That endpoint is rate-limited and does not use the CDN, so it can verify direct reads
+and coordinated fills but cannot establish production CDN hit rates or costs.
+The Durable Object binding and SQLite migration are included
+in `wrangler.jsonc` and are applied when deploying.
+
+When using a custom domain, add a Cache Rule for `/global-library/v1/*` marking requests
+eligible for cache, respecting successful responses' origin Cache-Control headers.
+Set **404 responses to no-store** in the Edge TTL status-code settings: a cached
+miss must not conceal an object after the Worker fills it. Cache Rules may override
+origin headers, so verify these settings on the deployed hostname. Use an R2 lifecycle
+rule to reclaim old windows; physical deletion is separate from freshness.
+Writes do not purge public R2/CDN copies: other clients see changes at the next
+window, while an open panel may retain its existing longer frontend cache.
+
+For a benchmark, record Worker requests and CPU, Durable Object requests/duration,
+and R2 reads/writes/storage. Compare identical browsing sessions with the origin
+setting empty and enabled, then repeat with simultaneous fresh panels and across a
+window boundary. Browser Network should show successful direct requests to the R2
+hostname after a fill; only fallback requests reach `/api/`. Those responses include
+`X-Public-Cache-Key` and `X-Global-Library-Cache: MISS` or `HIT`. CDN responses expose
+`CF-Cache-Status` and `Age` through CORS. Direct cache hits save Worker requests;
+simultaneous fallback callers still consume Worker and Durable Object requests
+even when their Onshape fetch is coalesced. Local tests do not establish global
+CDN hit rates or monthly costs. No plan-wide spending cap is implemented.
+
+Cloudflare references: [R2 public buckets](https://developers.cloudflare.com/r2/buckets/public-buckets/),
+[CORS](https://developers.cloudflare.com/r2/buckets/cors/),
+[Durable Objects](https://developers.cloudflare.com/durable-objects/concepts/what-are-durable-objects/).
+
+### Cache API fallback
+
+With an empty cache origin, the Worker uses Cloudflare's Cache API for the nine
+public library documents listed in `app/app.ts`. A test checks that its allowlist
+matches the frontend. This allowlist
 applies only to `https://cad.onshape.com`; Enterprise origins bypass shared caching.
 No KV namespace, database, or additional secret is required.
 

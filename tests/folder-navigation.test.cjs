@@ -510,6 +510,28 @@ test('HTTP thumbnail failures reject blob requests and allow another attempt', a
     assert.equal(requests, 2);
 });
 
+test('Cloudflare thumbnail transport preserves data URLs and shares concurrent image reads', async () => {
+    let calls = 0;
+    const transport = async (url, init) => {
+        calls++;
+        assert.equal(url, 'https://example.com/api/thumbnails/image');
+        assert.equal(init.headers.Authorization, 'Bearer token');
+        return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
+    };
+    const { OnshapeAPI } = load('app/onshapeapi.ts', {
+        './common/requestcache': { RequestCache },
+    }, {
+        FileReader: class {
+            readAsDataURL() { this.result = 'data:image/png;base64,AQID'; this.onload(); }
+        },
+    });
+    const api = new OnshapeAPI({ myserver: 'https://example.com', fetchOverride: transport });
+    api.access_token = 'token';
+    const values = await Promise.all([api.getThumbnail('/api/thumbnails/image'), api.getThumbnail('/api/thumbnails/image')]);
+    assert.deepEqual(values, ['data:image/png;base64,AQID', 'data:image/png;base64,AQID']);
+    assert.equal(calls, 1);
+});
+
 test('global library reads are cached for 3 hours, personal reads stay fresh', async () => {
     let now = 0;
     class TimedCache extends RequestCache {

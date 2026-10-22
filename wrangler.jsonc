@@ -10,6 +10,16 @@
     "run_worker_first": ["/*", "!/fonts/*"]
   },
   "vars": {
-    "ONSHAPE_ORIGIN": "https://cad.onshape.com"
-  }
+    "ONSHAPE_ORIGIN": "https://cad.onshape.com",
+    "PUBLIC_LIBRARY_CACHE_ORIGIN": ""
+  },
+  "r2_buckets": [
+    { "binding": "PUBLIC_LIBRARY_BUCKET", "bucket_name": "onshape-global-library-cache" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "PUBLIC_LIBRARY_REFRESH", "class_name": "GlobalLibraryRefresh" }]
+  },
+  "migrations": [
+    { "tag": "v1-public-library-refresh", "new_sqlite_classes": ["GlobalLibraryRefresh"] }
+  ]
 }

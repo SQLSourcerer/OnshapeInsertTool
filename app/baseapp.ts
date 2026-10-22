@@ -44,6 +44,7 @@ export class BaseApp {
     public elementId = '';
     public server = 'https://cad.onshape.com';
     public myserver = ''; // Fill in with your server
+    public fetchOverride?: onshapeConfig['fetchOverride'];
     public onshape: OnshapeAPI;
     public messaging: Messaging;
 
@@ -268,7 +269,7 @@ export class BaseApp {
         //
         // Initialize the Onshape APIs
         //
-        this.onshape = new OnshapeAPI(config);
+        this.onshape = new OnshapeAPI({ ...config, fetchOverride: this.fetchOverride });
 
         //
         // Cache the ones we need to work with overall

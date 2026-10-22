@@ -1,14 +1,10 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
 const { test } = require('node:test');
-const ts = require('typescript');
+const loadCloudflare = require('./helpers/cloudflare.cjs');
 
 function harness(fetch = () => { throw new Error('Unexpected upstream request'); }, logs = [], cache) {
-    const exports = {};
-    const source = fs.readFileSync(require.resolve('../cloudflare/worker.ts'), 'utf8');
-    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
-    vm.runInNewContext(code.outputText, { exports, URL, URLSearchParams, Request, Response, Headers, TypeError, fetch,
+    const exports = loadCloudflare('cloudflare/worker.ts', { TypeError, fetch,
         caches: cache && { open: async () => cache },
         Date: cache ? class extends Date { static now() { return cache.now; } } : Date,
         console: { warn: (...args) => logs.push(args), error() {} },
@@ -47,7 +43,7 @@ const user = token => ({ headers: { Authorization: 'Bearer ' + token } });
 
 test('backend library allowlist matches the frontend Global Libraries', () => {
     const frontend = fs.readFileSync(require.resolve('../app/app.ts'), 'utf8').match(/globalLibrariesNodes: string\[\] = \[([\s\S]*?)\];/)[1];
-    const worker = fs.readFileSync(require.resolve('../cloudflare/worker.ts'), 'utf8').match(/const globalLibraries = \[([\s\S]*?)\];/)[1];
+    const worker = fs.readFileSync(require.resolve('../cloudflare/publicresources.ts'), 'utf8').match(/const publicLibraries = \[([\s\S]*?)\];/)[1];
     assert.deepEqual(worker.match(/[a-f0-9]{24}/g), frontend.match(/[a-f0-9]{24}/g));
 });
 
