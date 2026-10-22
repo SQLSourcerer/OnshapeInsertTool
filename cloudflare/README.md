@@ -30,6 +30,13 @@ Apache configuration, or OAuth credentials. It uses `cloudflare/app_settings.jso
 instead of the ignored production settings and sets the backend URL to the page's
 own origin. Keep that test app name stable so preferences remain associated with it.
 
+The build also copies the six WOFF2 fonts in `cloudflare/fonts/` to `/fonts/`.
+These files were downloaded from `https://cad.onshape.com/fonts/` and supply the
+Open Sans regular/light and Flama Basic/Medium/Light/Bold faces referenced by the
+proxied Onshape CSS. Matching font requests use Static Assets directly, without
+invoking the Worker. Other paths retain Worker-first routing. If Onshape changes
+the font URLs in its CSS, update the bundled files to match.
+
 Deploy the Worker to obtain its stable HTTPS `workers.dev` URL:
 
 ```sh

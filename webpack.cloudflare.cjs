@@ -14,9 +14,10 @@ module.exports = (env, argv) => {
     config.plugins = config.plugins.filter((plugin) => !(plugin instanceof FileManagerPlugin));
     config.plugins.push(
         new webpack.NormalModuleReplacementPlugin(/app_settings\.json$/, path.resolve(__dirname, 'cloudflare/app_settings.json')),
-        new FileManagerPlugin({ events: { onEnd: { copy: [{
-            source: path.resolve(__dirname, 'app/static/*'), destination: output,
-        }] } } })
+        new FileManagerPlugin({ events: { onEnd: { copy: [
+            { source: path.resolve(__dirname, 'app/static/*'), destination: output },
+            { source: path.resolve(__dirname, 'cloudflare/fonts/*'), destination: path.join(output, 'fonts') },
+        ] } } })
     );
     return config;
 };

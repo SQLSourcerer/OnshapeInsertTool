@@ -7,7 +7,7 @@
   "assets": {
     "directory": "./dist-cloudflare",
     "binding": "ASSETS",
-    "run_worker_first": true
+    "run_worker_first": ["/*", "!/fonts/*"]
   },
   "vars": {
     "ONSHAPE_ORIGIN": "https://cad.onshape.com"
